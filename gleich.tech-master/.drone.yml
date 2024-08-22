@@ -1,0 +1,102 @@
+---
+kind: pipeline
+type: kubernetes
+name: default
+
+globals:
+  - &docker_cred
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+
+steps:
+  - name: Build_Docker_Image # building the API docker image
+    image: plugins/docker
+    settings:
+      repo: wgleich/resume
+      <<: *docker_cred
+      # registry: hub.docker.com
+      # dockerfile: /drone/src/.
+      tags: ["${DRONE_COMMIT_SHA:0:7}", "latest"]
+      when:
+        target:
+          exclude:
+            - production
+
+  - name: kube_deploy_dev # building the API docker image
+    image: gcr.io/cloud-builders/kubectl
+    commands:
+      - echo ${DRONE_COMMIT_SHA:0:7}
+      - sed -i  "s/latest/${DRONE_COMMIT_SHA:0:7}/g" ./dev/kustomization.yaml
+      - kubectl apply -k ./dev
+    when:
+      target:
+        exclude:
+          - production
+
+  - name: kube_promote_prod # building the API docker image
+    image: gcr.io/cloud-builders/kubectl
+    commands:
+      - echo ${DRONE_COMMIT_SHA:0:7}
+      - sed -i  "s/latest/${DRONE_COMMIT_SHA:0:7}/g" ./kustomize/deploy.yaml
+      - kubectl apply -k ./kustomize
+    when:
+      event:
+        - promote
+      target:
+        - production
+
+  - name: publish_gcr
+    image: plugins/gcr
+    settings:
+      repo: main-285019/resume
+      dockerfile: Dockerfile
+      tags: latest
+      json_key:
+        from_secret: gcpkey
+    when:
+      event:
+        - promote
+      target:
+        - production
+
+  - name: bump_cloud_run_image
+    image: gcr.io/cloud-builders/gcloud
+    environment:
+      GCPKEY:
+        from_secret: gcpescaped
+    commands:
+      - 'echo "$GCPKEY" >> ~/keyfile.json'
+      - gcloud auth activate-service-account --key-file ~/keyfile.json
+      - gcloud run deploy gleich-tech --image gcr.io/main-285019/resume:latest --platform managed --region us-central1 --project main-285019
+    when:
+      event:
+        - promote
+      target:
+        - production
+
+---
+kind: secret
+name: gcpescaped
+get:
+  path: secret/data/drone/gcp
+  name: keyfile.json
+---
+kind: secret
+name: docker_username
+get:
+  path: secret/data/drone/docker/login
+  name: username
+---
+kind: secret
+name: docker_password
+get:
+  path: secret/data/drone/docker/login
+  name: password
+---
+kind: secret
+name: gcpkey
+get:
+  path: secret/data/drone/gke
+  name: keyfile.json
